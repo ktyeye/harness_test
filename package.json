@@ -1,0 +1,14 @@
+{
+  "name": "claude-issue-harness-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal demo repository for GitHub Issue based Claude Code Action harness.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "lint": "node scripts/lint.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
