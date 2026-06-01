@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>타워 디펜스</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #1a1a2e;
+      color: #eee;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 6px;
+    }
+    canvas { cursor: pointer; display: block; }
+    #ui {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      background: #16213e;
+      padding: 10px 20px;
+      width: 800px;
+      border: 1px solid #2a2a4a;
+    }
+    .stat { font-size: 15px; }
+    .stat b { color: #f1c40f; }
+    #hint { font-size: 12px; color: #666; margin-left: 4px; }
+    #startBtn {
+      margin-left: auto;
+      padding: 8px 20px;
+      background: #0f3460;
+      color: #eee;
+      border: 1px solid #e94560;
+      cursor: pointer;
+      font-size: 14px;
+      border-radius: 4px;
+    }
+    #startBtn:hover:not(:disabled) { background: #e94560; }
+    #startBtn:disabled { opacity: 0.4; cursor: default; }
+    #msg { height: 28px; font-size: 20px; font-weight: bold; color: #e94560; }
+  </style>
+</head>
+<body>
+  <div id="msg"></div>
+  <canvas id="c" width="800" height="600"></canvas>
+  <div id="ui">
+    <div class="stat">💰 <b id="gold">200</b></div>
+    <div class="stat">❤️ <b id="lives">10</b></div>
+    <div class="stat">🌊 웨이브 <b id="wave">0</b>/5</div>
+    <div id="hint">타워 설치: 50골드 · 빈 타일 클릭</div>
+    <button id="startBtn">▶ 다음 웨이브</button>
+  </div>
+
+  <script>
+  (() => {
+    const TILE = 40, COLS = 20, ROWS = 15;
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+
+    // Path waypoints [col, row]
+    const WAYPOINTS = [[0,2],[5,2],[5,7],[14,7],[14,12],[19,12]];
+
+    function buildPath(waypoints) {
+      const tiles = [];
+      const seen = new Set();
+      function add(c, r) {
+        const k = c + ',' + r;
+        if (!seen.has(k)) { seen.add(k); tiles.push([c, r]); }
+      }
+      for (let i = 0; i < waypoints.length - 1; i++) {
+        const [x1, y1] = waypoints[i];
+        const [x2, y2] = waypoints[i + 1];
+        if (x1 === x2) {
+          const s = y2 > y1 ? 1 : -1;
+          for (let y = y1; y !== y2 + s; y += s) add(x1, y);
+        } else {
+          const s = x2 > x1 ? 1 : -1;
+          for (let x = x1; x !== x2 + s; x += s) add(x, y1);
+        }
+      }
+      return tiles;
+    }
+
+    const PATH = buildPath(WAYPOINTS);
+    const PATH_SET = new Set(PATH.map(([c, r]) => c + ',' + r));
+
+    // Game state
+    let gold = 200, lives = 10, wave = 0;
+    let towers = [];
+    let enemies = [];
+    let gameOver = false, gameWon = false;
+    let waveRunning = false;
+    let waveSpawningDone = false;
+    let hoverCol = -1, hoverRow = -1;
+
+    // ── Enemy ──────────────────────────────────────────────────────────
+    class Enemy {
+      constructor(hp, speed) {
+        this.pidx = 0;
+        this.t = 0;
+        this.hp = hp;
+        this.maxHp = hp;
+        this.speed = speed; // tiles/sec
+        this.dead = false;
+        this.reached = false;
+        this._lifeDeducted = false;
+        const [c, r] = PATH[0];
+        this.x = c * TILE + TILE / 2;
+        this.y = r * TILE + TILE / 2;
+      }
+
+      update(dt) {
+        if (this.dead || this.reached) return;
+        let rem = this.speed * dt;
+        while (rem > 0) {
+          if (this.pidx >= PATH.length - 1) { this.reached = true; return; }
+          const toNext = 1 - this.t;
+          if (rem >= toNext) {
+            rem -= toNext;
+            this.pidx++;
+            this.t = 0;
+          } else {
+            this.t += rem;
+            rem = 0;
+          }
+        }
+        if (this.pidx >= PATH.length - 1) { this.reached = true; return; }
+        const [c1, r1] = PATH[this.pidx];
+        const [c2, r2] = PATH[this.pidx + 1];
+        this.x = (c1 + (c2 - c1) * this.t) * TILE + TILE / 2;
+        this.y = (r1 + (r2 - r1) * this.t) * TILE + TILE / 2;
+      }
+
+      draw() {
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath();
+        ctx.ellipse(this.x, this.y + 10, 9, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#e74c3c';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 11, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#c0392b';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // HP bar
+        const bw = 22, bh = 3;
+        const bx = this.x - bw / 2, by = this.y - 19;
+        ctx.fillStyle = '#111';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.fillStyle = '#2ecc71';
+        ctx.fillRect(bx, by, bw * Math.max(0, this.hp / this.maxHp), bh);
+      }
+    }
+
+    // ── Bullet ─────────────────────────────────────────────────────────
+    class Bullet {
+      constructor(x, y, target, damage) {
+        this.x = x;
+        this.y = y;
+        this.target = target;
+        this.damage = damage;
+        this.speed = 260;
+        this.done = false;
+      }
+
+      update(dt) {
+        if (this.done) return;
+        const dx = this.target.x - this.x;
+        const dy = this.target.y - this.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const step = this.speed * dt;
+        if (d <= step + 4) {
+          if (!this.target.dead) {
+            this.target.hp -= this.damage;
+            if (this.target.hp <= 0) {
+              this.target.dead = true;
+              gold += 10;
+              updateUI();
+            }
+          }
+          this.done = true;
+        } else {
+          this.x += (dx / d) * step;
+          this.y += (dy / d) * step;
+        }
+      }
+
+      draw() {
+        ctx.fillStyle = '#f1c40f';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // ── Tower ──────────────────────────────────────────────────────────
+    class Tower {
+      constructor(col, row) {
+        this.col = col;
+        this.row = row;
+        this.x = col * TILE + TILE / 2;
+        this.y = row * TILE + TILE / 2;
+        this.range = 2.8 * TILE;
+        this.damage = 25;
+        this.rate = 1.2; // shots/sec
+        this.cd = 0;
+        this.bullets = [];
+        this.aimAngle = -Math.PI / 2;
+      }
+
+      findTarget() {
+        let best = null, bestDist = Infinity;
+        for (const e of enemies) {
+          if (e.dead || e.reached) continue;
+          const dx = e.x - this.x, dy = e.y - this.y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d <= this.range && d < bestDist) { bestDist = d; best = e; }
+        }
+        return best;
+      }
+
+      update(dt) {
+        this.cd = Math.max(0, this.cd - dt);
+        for (const b of this.bullets) b.update(dt);
+        this.bullets = this.bullets.filter(b => !b.done);
+
+        const target = this.findTarget();
+        if (target) {
+          this.aimAngle = Math.atan2(target.y - this.y, target.x - this.x);
+          if (this.cd === 0) {
+            this.cd = 1 / this.rate;
+            this.bullets.push(new Bullet(this.x, this.y, target, this.damage));
+          }
+        }
+      }
+
+      draw() {
+        const x = this.col * TILE, y = this.row * TILE;
+        // Base plate
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(x + 3, y + 3, TILE - 6, TILE - 6);
+        // Body
+        ctx.fillStyle = '#2980b9';
+        ctx.fillRect(x + 8, y + 8, TILE - 16, TILE - 16);
+        // Barrel
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.aimAngle);
+        ctx.fillStyle = '#1a252f';
+        ctx.fillRect(-3, -TILE / 2 + 4, 6, TILE / 2 - 6);
+        ctx.restore();
+        // Turret cap
+        ctx.fillStyle = '#3498db';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        for (const b of this.bullets) b.draw();
+      }
+    }
+
+    // ── UI helpers ─────────────────────────────────────────────────────
+    function updateUI() {
+      document.getElementById('gold').textContent = gold;
+      document.getElementById('lives').textContent = lives;
+      document.getElementById('wave').textContent = wave;
+    }
+
+    let msgTimer = null;
+    function showMsg(text, ms) {
+      document.getElementById('msg').textContent = text;
+      clearTimeout(msgTimer);
+      if (ms) msgTimer = setTimeout(() => document.getElementById('msg').textContent = '', ms);
+    }
+
+    // ── Wave spawning ──────────────────────────────────────────────────
+    function spawnWave(waveNum) {
+      const count = 4 + waveNum * 3;
+      const hp = 80 + waveNum * 60;
+      const speed = 1.4 + waveNum * 0.25;
+      waveSpawningDone = false;
+      let spawned = 0;
+      const iv = setInterval(() => {
+        if (spawned >= count) { clearInterval(iv); waveSpawningDone = true; return; }
+        enemies.push(new Enemy(hp, speed));
+        spawned++;
+      }, 1400);
+    }
+
+    // ── Input ──────────────────────────────────────────────────────────
+    canvas.addEventListener('mousemove', e => {
+      const r = canvas.getBoundingClientRect();
+      hoverCol = Math.floor((e.clientX - r.left) / TILE);
+      hoverRow = Math.floor((e.clientY - r.top) / TILE);
+    });
+
+    canvas.addEventListener('mouseleave', () => { hoverCol = -1; hoverRow = -1; });
+
+    canvas.addEventListener('click', e => {
+      if (gameOver || gameWon) return;
+      const r = canvas.getBoundingClientRect();
+      const col = Math.floor((e.clientX - r.left) / TILE);
+      const row = Math.floor((e.clientY - r.top) / TILE);
+      if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+      if (PATH_SET.has(col + ',' + row)) return;
+      if (towers.some(t => t.col === col && t.row === row)) return;
+      if (gold < 50) { showMsg('골드가 부족합니다!', 1500); return; }
+      gold -= 50;
+      towers.push(new Tower(col, row));
+      updateUI();
+    });
+
+    document.getElementById('startBtn').addEventListener('click', () => {
+      if (gameOver || gameWon || waveRunning) return;
+      wave++;
+      waveRunning = true;
+      document.getElementById('startBtn').disabled = true;
+      updateUI();
+      spawnWave(wave);
+    });
+
+    // ── Game loop ──────────────────────────────────────────────────────
+    let lastTs = null;
+
+    function loop(ts) {
+      if (!lastTs) lastTs = ts;
+      const dt = Math.min((ts - lastTs) / 1000, 0.05);
+      lastTs = ts;
+
+      if (!gameOver && !gameWon) {
+        for (const e of enemies) e.update(dt);
+        for (const t of towers) t.update(dt);
+
+        for (const e of enemies) {
+          if (e.reached && !e._lifeDeducted) {
+            e._lifeDeducted = true;
+            lives = Math.max(0, lives - 1);
+            updateUI();
+          }
+        }
+
+        if (lives <= 0 && !gameOver) {
+          gameOver = true;
+          showMsg('게임 오버!');
+          document.getElementById('startBtn').disabled = true;
+        }
+
+        if (!gameOver && waveRunning && waveSpawningDone &&
+            enemies.every(e => e.dead || e.reached)) {
+          waveRunning = false;
+          enemies = [];
+          if (wave >= 5) {
+            gameWon = true;
+            showMsg('🎉 승리! 모든 웨이브 클리어!');
+          } else {
+            document.getElementById('startBtn').disabled = false;
+            showMsg('웨이브 ' + wave + ' 클리어!', 2000);
+          }
+        } else {
+          enemies = enemies.filter(e => !e.dead && !e.reached);
+        }
+      }
+
+      // ── Draw ────────────────────────────────────────────────────────
+      ctx.clearRect(0, 0, 800, 600);
+
+      // Tiles
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (PATH_SET.has(c + ',' + r)) {
+            ctx.fillStyle = '#c8a872';
+          } else {
+            ctx.fillStyle = (c + r) % 2 === 0 ? '#2d5a27' : '#285224';
+          }
+          ctx.fillRect(c * TILE, r * TILE, TILE, TILE);
+        }
+      }
+
+      // Hover highlight
+      if (hoverCol >= 0 && hoverRow >= 0 && !gameOver && !gameWon) {
+        const key = hoverCol + ',' + hoverRow;
+        const isPath = PATH_SET.has(key);
+        const hasTower = towers.some(t => t.col === hoverCol && t.row === hoverRow);
+        if (!isPath && !hasTower) {
+          ctx.fillStyle = gold >= 50 ? 'rgba(52,152,219,0.35)' : 'rgba(231,76,60,0.3)';
+          ctx.fillRect(hoverCol * TILE, hoverRow * TILE, TILE, TILE);
+        }
+      }
+
+      // Grid lines
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+      ctx.lineWidth = 0.5;
+      for (let c = 0; c <= COLS; c++) {
+        ctx.beginPath(); ctx.moveTo(c * TILE, 0); ctx.lineTo(c * TILE, 600); ctx.stroke();
+      }
+      for (let r = 0; r <= ROWS; r++) {
+        ctx.beginPath(); ctx.moveTo(0, r * TILE); ctx.lineTo(800, r * TILE); ctx.stroke();
+      }
+
+      // Path direction arrows
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for (let i = 0; i < PATH.length - 1; i++) {
+        const [c1, r1] = PATH[i], [c2, r2] = PATH[i + 1];
+        const angle = Math.atan2(r2 - r1, c2 - c1);
+        const cx = c1 * TILE + TILE / 2, cy = r1 * TILE + TILE / 2;
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(angle);
+        ctx.fillText('›', 0, 0);
+        ctx.restore();
+      }
+
+      // Start / End markers
+      ctx.font = 'bold 10px sans-serif';
+      const [sc, sr] = PATH[0];
+      ctx.fillStyle = '#27ae60';
+      ctx.fillText('START', sc * TILE + TILE / 2, sr * TILE + TILE / 2);
+      const [ec, er] = PATH[PATH.length - 1];
+      ctx.fillStyle = '#e74c3c';
+      ctx.fillText('END', ec * TILE + TILE / 2, er * TILE + TILE / 2);
+
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+
+      for (const t of towers) t.draw();
+      for (const e of enemies) if (!e.dead) e.draw();
+
+      requestAnimationFrame(loop);
+    }
+
+    updateUI();
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>
